@@ -11,6 +11,7 @@ import collector.domain.apiservice.AppServiceList;
 import collector.domain.entities.*;
 import collector.domain.prom.ExpressionQueriesVectorResponse;
 import collector.domain.relationships.*;
+import collector.domain.skywalkingTrace.Data;
 import collector.domain.trace.BinaryAnnotation;
 import collector.domain.trace.Span;
 import collector.util.MatcherUrlRouterUtil;
@@ -23,6 +24,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
@@ -52,8 +54,12 @@ public class DataCollectorService {
     private String promethsusQuery;
 
     //zipkin的查询地址
-    @Value("${k8s.zipkin.ip}")
-    private String zipkinQuery;
+//    @Value("${k8s.zipkin.ip}")
+//    private String zipkinQuery;
+
+    //skywalking的查询地址
+    @Value("${k8s.skywalking.ip}")
+    private String skywalkingQuery;
 
     //集群全部机器的ip地址
     @Value("${k8s.cluster.ips}")
@@ -112,11 +118,13 @@ public class DataCollectorService {
     public void uploadTracesPeriodly(){
         synchronized (objLockForPeriodly) {
             SimpleDateFormat dateFormat = new SimpleDateFormat("HH:mm:ss");
-            System.out.println("[开始]定期刷新调用关系 现在时间：" + dateFormat.format(new Date()));
-            uploadApiSvcRelations();
+            Date now = new Date();
+            System.out.println("[开始]定期刷新调用关系 现在时间：" + dateFormat.format(now));
+            uploadApiSvcRelations(now);
             System.out.println("[完成]定期刷新调用关系 现在时间：" + dateFormat.format(new Date()));
-            System.out.println("[开始]定期上传Trace 现在时间：" + dateFormat.format(new Date()));
-            uploadEveryTrace();
+            now = new Date();
+            System.out.println("[开始]定期上传Trace 现在时间：" + dateFormat.format(now));
+            uploadEveryTrace(now);
             System.out.println("[完成]定期上传Trace 现在时间：" + dateFormat.format(new Date()));
         }
     }
@@ -137,18 +145,54 @@ public class DataCollectorService {
     }
 
     //读取和记录zipkin的trace
-    public ArrayList<ArrayList<Span>> getAndParseTrace(){
-        String list = restTemplate.getForObject(zipkinQuery, String.class);
-        Type founderListType = new TypeToken<ArrayList<ArrayList<Span>>>(){}.getType();
-        return gson.fromJson(list, founderListType);
+//    public ArrayList<ArrayList<Span>> getAndParseTrace(){
+//        String list = restTemplate.getForObject(zipkinQuery, String.class);
+//        Type founderListType = new TypeToken<ArrayList<ArrayList<Span>>>(){}.getType();
+//        return gson.fromJson(list, founderListType);
+//    }
+
+    //读取和记录skywalking的trace
+    public ArrayList<ArrayList<Span>> getAndParseTrace(Date now){
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HashMap<String, Object> map = new HashMap<>();
+        map.put("query", "query queryTraces($condition: TraceQueryCondition) {\n  data: queryBasicTraces(condition: $condition) {\n    traces {\n      key: segmentId\n      endpointNames\n      duration\n      start\n      isError\n      traceIds\n    }\n    total\n  }}");
+        HashMap<String, Object> variablesMap = new HashMap<>();
+        HashMap<String, Object> queryDuration = new HashMap<>();
+        HashMap<String, Object> conditionMap = new HashMap<>();
+        HashMap<String, Object> pagingMap = new HashMap<>();
+        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HHmmss");
+        queryDuration.put("start", dateFormat.format(now.getTime()-8*60*60*1000-80000));
+        queryDuration.put("end", dateFormat.format(now));
+        queryDuration.put("step", "SECOND");
+
+        pagingMap.put("pageNum", 1);
+        pagingMap.put("pageSize", 100);
+        pagingMap.put("needTotal", true);
+
+        conditionMap.put("queryDuration", queryDuration);
+        conditionMap.put("paging", pagingMap);
+        conditionMap.put("queryOrder", "BY_START_TIME");
+        conditionMap.put("traceState", "ALL");
+
+        variablesMap.put("condition", conditionMap);
+        map.put("variables", variablesMap);
+        HttpEntity<HashMap<String, Object>> request = new HttpEntity<>(map, headers);
+        String list = restTemplate.postForObject(skywalkingQuery, request, String.class);
+        System.out.println(list);
+        Type founderType = new TypeToken<Data>(){}.getType();
+        Data data = gson.fromJson(list, founderType);
+        System.out.println(data);
+
+        return null;
     }
 
     //将Trace的各个Span解析出来并上传到图中 包括这个Trace经过的Pod和API
     //示例： Service A Pod 1 -> Service B Api 1 -> Service B Pod 1
     //注意：这个函数上传的是这个Trace 是针对单独trace而言的
-    public void uploadEveryTrace(){
+    public void uploadEveryTrace(Date now){
         //1.获得所有的Trace
-        ArrayList<ArrayList<Span>> traces = getAndParseTrace();
+        ArrayList<ArrayList<Span>> traces = getAndParseTrace(now);
         //2.依次解析每一条trace
         for(ArrayList<Span> trace : traces){
             //这条trace如果已经被处理过的话 就不再处理了
@@ -184,10 +228,10 @@ public class DataCollectorService {
     //可以从Trace中抽取出API所属于哪个Service以及API被哪些Service调用过
     //这些信息的统计量将会被上传到图中
     //上传的是统计量而不是Trace本身
-    public void uploadApiSvcRelations(){
+    public void uploadApiSvcRelations(Date now){
         ArrayList<AppServiceHostServiceAPI> svcApiRelations = new ArrayList<>();
         ArrayList<AppServiceInvokeServiceAPI> svcInvokeApiRelations = new ArrayList<>();
-        getServiceHostApiAndServiceInvokeApi(svcApiRelations, svcInvokeApiRelations);
+        getServiceHostApiAndServiceInvokeApi(svcApiRelations, svcInvokeApiRelations, now);
         //向对面提交一堆并处理结果
         ArrayList<AppServiceHostServiceAPI> updatedSvcApiRelations = restTemplate.postForObject(
                 neo4jDaoIP + "/apiHostService", svcApiRelations, svcApiRelations.getClass());
@@ -363,9 +407,10 @@ public class DataCollectorService {
     //收集所有的Trace 解析服务及其API 以及服务与API的调用关系
     //抽取结果放进了参数中提供的容器中
     public void getServiceHostApiAndServiceInvokeApi(ArrayList<AppServiceHostServiceAPI> svcHostApi,
-                                                     ArrayList<AppServiceInvokeServiceAPI> svcInvokeApi){
+                                                     ArrayList<AppServiceInvokeServiceAPI> svcInvokeApi,
+                                                     Date now){
         //获取trace
-        ArrayList<ArrayList<Span>> traces = getAndParseTrace();
+        ArrayList<ArrayList<Span>> traces = getAndParseTrace(now);
         System.out.println("Trace数量:" + traces.size());
         //遍历每一个trace
         for(ArrayList<Span> trace : traces){
@@ -504,15 +549,16 @@ public class DataCollectorService {
     private ExpressionQueriesVectorResponse getMetric(String metricName, String containerName){
 
         String queryStr = metricName + "{" + "name=" + "\"" + containerName + "\"" + "}";
-
         MultiValueMap<String, Object> postParameters = new LinkedMultiValueMap<>();
+        System.out.println(queryStr);
         postParameters.add("query", queryStr);
+        HashMap<String, String> getParameters = new HashMap<>();
+        getParameters.put("query", queryStr);
         HttpHeaders headers = new HttpHeaders();
         headers.add("Content-Type", "application/x-www-form-urlencoded");
         HttpEntity<MultiValueMap<String, Object>> r = new HttpEntity<>(postParameters, headers);
-
-        String str = restTemplate.postForObject(promethsusQuery,r,String.class);
-
+//        String str = restTemplate.postForObject(promethsusQuery,r,String.class);
+        String str = restTemplate.getForObject(promethsusQuery + "?query={query}", String.class, getParameters);
         if(str.contains("\"resultType\":\"vector\"")){
             ExpressionQueriesVectorResponse res = gson.fromJson(str,ExpressionQueriesVectorResponse.class);
             return res;
@@ -756,6 +802,7 @@ public class DataCollectorService {
     //Assembly Metrics
     private MetricAndContainer assembleMetricAndContainer(String metricName, String containerName, Container container){
         ExpressionQueriesVectorResponse res = getMetric(metricName, containerName);
+        if(res.getData().getResult().size()==0)return null;
         Metric metric = getMetricFromExpressionQueriesVectorResponse(res, metricName, containerName);
         MetricAndContainer relation = new MetricAndContainer();
         relation.setContainer(container);
