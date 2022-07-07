@@ -31,6 +31,11 @@ public class MovieController {
 		return movieService.postTracePodToApi(relations);
 	}
 
+	@PostMapping("/traceApiToApi")
+	public ArrayList<TraceInvokeApiToApi> postTraceApiToApi(@RequestBody ArrayList<TraceInvokeApiToApi> relations){
+		return movieService.postTraceApiToApi(relations);
+	}
+
 	@PostMapping("/apiHostService")
 	public ArrayList<AppServiceHostServiceAPI> postAppServiceAndServiceApi(@RequestBody ArrayList<AppServiceHostServiceAPI> relations){
 		return movieService.postListOfAppServiceAndServiceAPI(relations);

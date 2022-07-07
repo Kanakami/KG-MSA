@@ -41,6 +41,8 @@ public class MovieService {
 
 	private final TraceInvokePodToApiRepository traceInvokePodToApiRepository;
 
+	private final TraceInvokeApiToApiRepository traceInvokeApiToApiRepository;
+
 	private final MetricOfServiceApiRepository metricOfServiceApiRepository;
 
 	private final MetricAndServiceApiRepository metricAndServiceApiRepository;
@@ -63,7 +65,7 @@ public class MovieService {
 						AppServiceInvokeApiRepository appServiceInvokeApiRepository,
 						TraceInvokeApiToPodRepository traceInvokeApiToPodRepository,
 						TraceInvokePodToApiRepository traceInvokePodToApiRepository,
-						MetricOfServiceApiRepository metricOfServiceApiRepository,
+						TraceInvokeApiToApiRepository traceInvokeApiToApiRepository, MetricOfServiceApiRepository metricOfServiceApiRepository,
 						MetricAndServiceApiRepository metricAndServiceApiRepository,
 						MetricAndPodRepository metricAndPodRepository,
 						MetricOfPodRepository metricOfPodRepository) {
@@ -81,13 +83,14 @@ public class MovieService {
 		this.appServiceInvokeApiRepository = appServiceInvokeApiRepository;
 		this.traceInvokeApiToPodRepository = traceInvokeApiToPodRepository;
 		this.traceInvokePodToApiRepository = traceInvokePodToApiRepository;
+		this.traceInvokeApiToApiRepository = traceInvokeApiToApiRepository;
 		this.metricOfServiceApiRepository = metricOfServiceApiRepository;
 		this.metricAndServiceApiRepository = metricAndServiceApiRepository;
 		this.metricAndPodRepository = metricAndPodRepository;
 		this.metricOfPodRepository = metricOfPodRepository;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<ServiceApiAndMetric> postMetricsOfServiceApi(ArrayList<ServiceApiAndMetric> relations){
 
 		ArrayList<ServiceApiAndMetric> result = new ArrayList<>();
@@ -171,7 +174,7 @@ public class MovieService {
 		return treeMap;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<TraceInvokeApiToPod> postTraceApiToPod(ArrayList<TraceInvokeApiToPod> relations){
 		ArrayList<TraceInvokeApiToPod> result = new ArrayList<>();
 		for(TraceInvokeApiToPod relation : relations) {
@@ -195,10 +198,11 @@ public class MovieService {
 		return result;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<TraceInvokePodToApi> postTracePodToApi(ArrayList<TraceInvokePodToApi> relations){
 		ArrayList<TraceInvokePodToApi> result = new ArrayList<>();
 		for(TraceInvokePodToApi relation : relations) {
+			System.out.println("FIND RELATION ID " + relation.getId());
 			Optional<TraceInvokePodToApi> savedRelationOptional =
 					traceInvokePodToApiRepository.findById(relation.getId());
 			if(!savedRelationOptional.isPresent()){
@@ -217,7 +221,26 @@ public class MovieService {
 		return result;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
+	public ArrayList<TraceInvokeApiToApi> postTraceApiToApi(ArrayList<TraceInvokeApiToApi> relations){
+		ArrayList<TraceInvokeApiToApi> result = new ArrayList<>();
+		for(TraceInvokeApiToApi relation: relations){
+			System.out.println("FIND RELATION ID " + relation.getId());
+			Optional<TraceInvokeApiToApi> savedRelationOptional = traceInvokeApiToApiRepository.findById(relation.getId());
+			if(!savedRelationOptional.isPresent()){
+				relation.setServiceAPIFrom(serviceApiRepository.save(relation.getServiceAPIFrom()));
+				relation.setServiceAPITo(serviceApiRepository.save(relation.getServiceAPITo()));
+				relation = traceInvokeApiToApiRepository.save(relation);
+				result.add(relation);
+				System.out.println("不存在");
+			}else{
+				System.out.println("存在");
+			}
+		}
+		return result;
+	}
+
+	@Transactional()
 	public ArrayList<AppServiceHostServiceAPI> postListOfAppServiceAndServiceAPI(ArrayList<AppServiceHostServiceAPI> list){
 		ArrayList<AppServiceHostServiceAPI> result = new ArrayList<>();
 		for(AppServiceHostServiceAPI relation : list){
@@ -233,7 +256,7 @@ public class MovieService {
 		return result;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<AppServiceInvokeServiceAPI> postListOfAppServiceInvokeServiceAPI(ArrayList<AppServiceInvokeServiceAPI> list){
 		ArrayList<AppServiceInvokeServiceAPI> result = new ArrayList<>();
 		for(AppServiceInvokeServiceAPI relation : list){
@@ -263,13 +286,13 @@ public class MovieService {
 		return metric;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public Metric postMetric(Metric metric) {
 		Metric newMetric = metricRepository.save(metric);
 		return metric;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<PodAndMetric> postPodAndMetric(ArrayList<PodAndMetric> podAndMetrics){
 		ArrayList<PodAndMetric> result = new ArrayList<>();
 
@@ -306,7 +329,7 @@ public class MovieService {
 	}
 
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<Metric> updateMetrics(ArrayList<Metric> metrics){
 		ArrayList<Metric> returnMetrics = new ArrayList<>();
 		for(Metric metric : metrics){
@@ -351,7 +374,7 @@ public class MovieService {
 		return container;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public Container postContainer(Container container){
 		Container newContainer = containerRepository.save(container);
 		return newContainer;
@@ -371,7 +394,7 @@ public class MovieService {
 		return service;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public AppService postAppService(AppService appService){
 		AppService newAppService = appServiceRepository.save(appService);
 		return newAppService;
@@ -391,7 +414,7 @@ public class MovieService {
 		return pod;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public Pod postPod(Pod pod){
 		Pod newPod = podRepository.save(pod);
 		return newPod;
@@ -411,7 +434,7 @@ public class MovieService {
 		return vm;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public VirtualMachine postVirtualMachine(VirtualMachine vm){
 		VirtualMachine newVM = virtualMachineRepository.save(vm);
 		return newVM;
@@ -429,7 +452,7 @@ public class MovieService {
 		return appServiceAndPod.get();
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public AppServiceAndPod postAppServiceAndPod(AppServiceAndPod appServiceAndPod){
 
 		AppService appService = appServiceAndPod.getAppService();
@@ -446,7 +469,7 @@ public class MovieService {
 		return appServiceAndPod;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<AppServiceAndPod> postAppServiceAndPodList(ArrayList<AppServiceAndPod> relations){
 		ArrayList<AppServiceAndPod> result = new ArrayList<>();
 		for(AppServiceAndPod relation : relations){
@@ -462,7 +485,7 @@ public class MovieService {
 		return podAndContainer.get();
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public PodAndContainer postPodAndContainer(PodAndContainer podAndContainer){
 		Pod pod = podAndContainer.getPod();
 		Container container = podAndContainer.getContainer();
@@ -478,7 +501,7 @@ public class MovieService {
 		return podAndContainer;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<PodAndContainer> postPodAndContainerList(ArrayList<PodAndContainer> relations){
 		ArrayList<PodAndContainer> result = new ArrayList<>();
 		for(PodAndContainer relation : relations){
@@ -494,12 +517,11 @@ public class MovieService {
 		return relation.get();
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public MetricAndContainer postMetricAndContainer(MetricAndContainer metricAndContainer) {
 
 		Metric metric = metricAndContainer.getMetric();
 		Container container = metricAndContainer.getContainer();
-
 		if(!metricRepository.findByName(metric.getName()).isPresent() ||
 				!containerRepository.findByName(container.getName()).isPresent()){
 			metric = metricRepository.save(metric);
@@ -515,7 +537,7 @@ public class MovieService {
 		return metricAndContainer;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<MetricAndContainer> postMetricAndContainerList(ArrayList<MetricAndContainer> relations){
 		ArrayList<MetricAndContainer> result = new ArrayList<>();
 		for(MetricAndContainer relation : relations){
@@ -531,12 +553,12 @@ public class MovieService {
 		return deploy.get();
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public VirtualMachineAndPod postVirtualMachineAndPod(VirtualMachineAndPod virtualMachineAndPod){
 
 		VirtualMachine vm = virtualMachineAndPod.getVirtualMachine();
 		Pod pod = virtualMachineAndPod.getPod();
-
+		System.out.println(vm);
 		vm = virtualMachineRepository.save(vm);
 		pod = podRepository.save(pod);
 
@@ -548,7 +570,7 @@ public class MovieService {
 		return virtualMachineAndPod;
 	}
 
-	@Transactional(readOnly = true)
+	@Transactional()
 	public ArrayList<VirtualMachineAndPod> postVirtualMachineAndPodList(ArrayList<VirtualMachineAndPod> relations){
 		ArrayList<VirtualMachineAndPod> result = new ArrayList<>();
 		for(VirtualMachineAndPod relation : relations){

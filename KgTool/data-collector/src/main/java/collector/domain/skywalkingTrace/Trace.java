@@ -9,7 +9,6 @@ import java.util.ArrayList;
 @NoArgsConstructor
 @Setter
 @Getter
-public class Data {
-    private int total;
-    private ArrayList<SimpleTrace> traces;
+public class Trace {
+    private ArrayList<SkywalkingSpan> spans;
 }

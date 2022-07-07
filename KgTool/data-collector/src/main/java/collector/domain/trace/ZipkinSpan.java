@@ -1,8 +1,10 @@
 package collector.domain.trace;
 
-import java.util.ArrayList;
+import lombok.AllArgsConstructor;
 
-public class Span {
+import java.util.ArrayList;
+@AllArgsConstructor
+public class ZipkinSpan {
 
     private String traceId;
 
@@ -20,7 +22,7 @@ public class Span {
 
     private ArrayList<BinaryAnnotation> binaryAnnotations;
 
-    public Span() {
+    public ZipkinSpan() {
         //Empty Constructor
     }
 

@@ -4,6 +4,8 @@ import neo4jserver.domain.ContainerResult;
 import neo4jserver.domain.entities.Container;
 import org.springframework.data.neo4j.annotation.Query;
 import org.springframework.data.neo4j.repository.Neo4jRepository;
+import org.springframework.data.repository.query.Param;
+
 import java.util.ArrayList;
 import java.util.Optional;
 
@@ -15,8 +17,8 @@ public interface ContainerRepository extends Neo4jRepository<Container, Long> {
     ContainerResult getContainerWithLabels(Long id);
 
 
-    @Query("MATCH (n:Container) where n.name={0} RETURN n")
-    Optional<Container> findByName(String name);
+    @Query("MATCH (n:Container) where n.name=$name RETURN n")
+    Optional<Container> findByName(@Param("name") String name);
 
     @Query("MATCH (n:Container) return n")
     ArrayList<Container> findAllContainers();

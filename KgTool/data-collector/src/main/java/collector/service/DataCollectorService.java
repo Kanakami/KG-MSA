@@ -11,9 +11,10 @@ import collector.domain.apiservice.AppServiceList;
 import collector.domain.entities.*;
 import collector.domain.prom.ExpressionQueriesVectorResponse;
 import collector.domain.relationships.*;
-import collector.domain.skywalkingTrace.Data;
+import collector.domain.skywalkingTrace.*;
 import collector.domain.trace.BinaryAnnotation;
-import collector.domain.trace.Span;
+//import collector.domain.trace.Span;
+import collector.domain.trace.ZipkinSpan;
 import collector.util.MatcherUrlRouterUtil;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -54,8 +55,8 @@ public class DataCollectorService {
     private String promethsusQuery;
 
     //zipkin的查询地址
-//    @Value("${k8s.zipkin.ip}")
-//    private String zipkinQuery;
+    @Value("${k8s.zipkin.ip}")
+    private String zipkinQuery;
 
     //skywalking的查询地址
     @Value("${k8s.skywalking.ip}")
@@ -81,6 +82,8 @@ public class DataCollectorService {
     private static ConcurrentHashMap<String, VirtualMachine> vms = new ConcurrentHashMap<>();
     private static ConcurrentHashMap<String, AppService> svcs = new ConcurrentHashMap<>();
     private static ConcurrentHashMap<String, Pod> pods = new ConcurrentHashMap<>();
+    // Skywalking Trace中没有对应的pod名，只能用实例IP对应
+    private static ConcurrentHashMap<String, Pod> IPpods = new ConcurrentHashMap<>();
     private static ConcurrentHashMap<String, Container> containers = new ConcurrentHashMap<>();
     //放的是name到实体的映射
     private static ConcurrentHashMap<String, ServiceAPI> apis = new ConcurrentHashMap<>();
@@ -110,6 +113,7 @@ public class DataCollectorService {
             System.out.println("[开始]定期刷新应用骨架 现在时间：" + dateFormat.format(new Date()));
             createRawFrameworkToKnowledgeGraph();
             System.out.println("[完成]定期刷新应用骨架 现在时间：" + dateFormat.format(new Date()));
+
         }
     }
 
@@ -120,11 +124,11 @@ public class DataCollectorService {
             SimpleDateFormat dateFormat = new SimpleDateFormat("HH:mm:ss");
             Date now = new Date();
             System.out.println("[开始]定期刷新调用关系 现在时间：" + dateFormat.format(now));
-            uploadApiSvcRelations(now);
+            uploadApiSvcRelationsSkywalking(now);
             System.out.println("[完成]定期刷新调用关系 现在时间：" + dateFormat.format(new Date()));
             now = new Date();
             System.out.println("[开始]定期上传Trace 现在时间：" + dateFormat.format(now));
-            uploadEveryTrace(now);
+            uploadEveryTraceSkywalking(now);
             System.out.println("[完成]定期上传Trace 现在时间：" + dateFormat.format(new Date()));
         }
     }
@@ -145,14 +149,14 @@ public class DataCollectorService {
     }
 
     //读取和记录zipkin的trace
-//    public ArrayList<ArrayList<Span>> getAndParseTrace(){
-//        String list = restTemplate.getForObject(zipkinQuery, String.class);
-//        Type founderListType = new TypeToken<ArrayList<ArrayList<Span>>>(){}.getType();
-//        return gson.fromJson(list, founderListType);
-//    }
+    public ArrayList<ArrayList<ZipkinSpan>> getAndParseTraceZipkin(){
+        String list = restTemplate.getForObject(zipkinQuery, String.class);
+        Type founderListType = new TypeToken<ArrayList<ArrayList<ZipkinSpan>>>(){}.getType();
+        return gson.fromJson(list, founderListType);
+    }
 
     //读取和记录skywalking的trace
-    public ArrayList<ArrayList<Span>> getAndParseTrace(Date now){
+    public ArrayList<SimpleTrace> getAndParseTraceSkywalking(Date now){
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         HashMap<String, Object> map = new HashMap<>();
@@ -165,36 +169,56 @@ public class DataCollectorService {
         queryDuration.put("start", dateFormat.format(now.getTime()-8*60*60*1000-80000));
         queryDuration.put("end", dateFormat.format(now));
         queryDuration.put("step", "SECOND");
-
-        pagingMap.put("pageNum", 1);
+        int pageNum = 0;
+        int total = 1;
         pagingMap.put("pageSize", 100);
         pagingMap.put("needTotal", true);
 
         conditionMap.put("queryDuration", queryDuration);
-        conditionMap.put("paging", pagingMap);
         conditionMap.put("queryOrder", "BY_START_TIME");
         conditionMap.put("traceState", "ALL");
 
-        variablesMap.put("condition", conditionMap);
-        map.put("variables", variablesMap);
-        HttpEntity<HashMap<String, Object>> request = new HttpEntity<>(map, headers);
-        String list = restTemplate.postForObject(skywalkingQuery, request, String.class);
-        System.out.println(list);
-        Type founderType = new TypeToken<Data>(){}.getType();
-        Data data = gson.fromJson(list, founderType);
-        System.out.println(data);
-
-        return null;
+        // 获取全部trace
+        Data data = new Data();
+        while(pageNum*100 < total) {
+            pageNum++;
+            pagingMap.put("pageNum", pageNum);
+            conditionMap.put("paging", pagingMap);
+            variablesMap.put("condition", conditionMap);
+            map.put("variables", variablesMap);
+            HttpEntity<HashMap<String, Object>> request = new HttpEntity<>(map, headers);
+            String list = restTemplate.postForObject(skywalkingQuery, request, String.class);
+            if(list != null)
+                list = list.substring(8,list.length()-1);
+//            System.out.println(list);
+            DataOutside dataOutside = gson.fromJson(list, DataOutside.class);
+            data = dataOutside.getData();
+            total = data.getTotal();
+        }
+        // 获取全部trace的细节信息
+        map.clear();
+        map.put("query", "query queryTrace($traceId: ID!) {\n  trace: queryTrace(traceId: $traceId) {\n    spans {\n      traceId\n      segmentId\n      spanId\n      parentSpanId\n      refs {\n        traceId\n        parentSegmentId\n        parentSpanId\n        type\n      }\n      serviceCode\n      serviceInstanceName\n      startTime\n      endTime\n      endpointName\n      type\n      peer\n      component\n      isError\n      layer\n      tags {\n        key\n        value\n      }\n      logs {\n        time\n        data {\n          key\n          value\n        }\n      }\n    }\n  }\n  }");
+        variablesMap.clear();
+        for (int i = 0; i < data.getTraces().size(); i++){
+            variablesMap.put("traceId", data.getTraces().get(i).getTraceIds().get(0));
+            map.put("variables", variablesMap);
+            HttpEntity<HashMap<String, Object>> request = new HttpEntity<>(map, headers);
+            String list = restTemplate.postForObject(skywalkingQuery, request, String.class);
+            if(list != null)
+                list = list.substring(17,list.length()-2);
+            data.getTraces().get(i).setTrace(gson.fromJson(list, Trace.class));
+        }
+        return data.getTraces();
     }
 
     //将Trace的各个Span解析出来并上传到图中 包括这个Trace经过的Pod和API
     //示例： Service A Pod 1 -> Service B Api 1 -> Service B Pod 1
     //注意：这个函数上传的是这个Trace 是针对单独trace而言的
-    public void uploadEveryTrace(Date now){
+    public void uploadEveryTraceZipkin(Date now){
         //1.获得所有的Trace
-        ArrayList<ArrayList<Span>> traces = getAndParseTrace(now);
+        ArrayList<ArrayList<ZipkinSpan>> traces = getAndParseTraceZipkin();
         //2.依次解析每一条trace
-        for(ArrayList<Span> trace : traces){
+        for(ArrayList<ZipkinSpan> trace : traces){
             //这条trace如果已经被处理过的话 就不再处理了
             if(uploadedTraces.contains(trace.get(0).getTraceId())){
                 continue;
@@ -203,7 +227,7 @@ public class DataCollectorService {
             ArrayList<TraceInvokeApiToPod> traceApiToPod = new ArrayList<>();
             ArrayList<TraceInvokePodToApi> tracePodToApi = new ArrayList<>();
 
-            getTraceInvokeInformation(trace, traceApiToPod, tracePodToApi);
+            getTraceInvokeInformationZipkin(trace, traceApiToPod, tracePodToApi);
 
             //3.两个部分分别上传
             try{
@@ -224,14 +248,74 @@ public class DataCollectorService {
         System.out.println("Trace上传完成");
     }
 
+    public void uploadEveryTraceSkywalking(Date now){
+        //1.获得所有的Trace
+        ArrayList<SimpleTrace> traces = getAndParseTraceSkywalking(now);
+        //2.依次解析每一条trace
+        for(SimpleTrace trace : traces){
+            //这条trace如果已经被处理过的话 就不再处理了
+            if(uploadedTraces.contains(trace.getTraceIds().get(0))){
+                continue;
+            }
+            //如果这条trace是prometheus的也不处理
+            String endpointName = trace.getEndpointNames().get(0);
+            if(endpointName.endsWith("prometheus")){
+                continue;
+            }
+            //3.每一条trace会被解析成三个部分：Pod->Exit API->Entry API->Pod(如果splitSpan为True）
+            ArrayList<TraceInvokeApiToPod> traceApiToPod = new ArrayList<>();
+            ArrayList<TraceInvokePodToApi> tracePodToApi = new ArrayList<>();
+            ArrayList<TraceInvokeApiToApi> traceApiToApi = new ArrayList<>();
+
+            getTraceInvokeInformationSkywalking(trace, traceApiToPod, tracePodToApi, traceApiToApi, Boolean.FALSE);
+
+            //3.三个部分分别上传
+            try{
+                System.out.println(traceApiToPod.size() + " " + tracePodToApi.size() + " " + traceApiToApi.size());
+                if(!traceApiToPod.isEmpty()){
+                    restTemplate.postForObject(neo4jDaoIP + "/traceApiToPod", traceApiToPod, traceApiToPod.getClass());
+                }
+                if(!tracePodToApi.isEmpty()){
+                    restTemplate.postForObject(neo4jDaoIP + "/tracePodToApi", tracePodToApi, tracePodToApi.getClass());
+                }
+                if(!traceApiToApi.isEmpty()){
+                    restTemplate.postForObject(neo4jDaoIP + "/traceApiToApi", traceApiToApi, traceApiToApi.getClass());
+                }
+                uploadedTraces.add(trace.getTraceIds().get(0));
+                System.out.println("上传Trace " + trace.getTraceIds().get(0));
+            }catch (Exception e){
+                e.printStackTrace();
+            }
+
+        }
+        //4.完成
+        System.out.println("Trace上传完成");
+    }
+
     //从Trace中抽取API和Service之间的关系并上传
     //可以从Trace中抽取出API所属于哪个Service以及API被哪些Service调用过
     //这些信息的统计量将会被上传到图中
     //上传的是统计量而不是Trace本身
-    public void uploadApiSvcRelations(Date now){
+    public void uploadApiSvcRelationsZipkin(Date now){
         ArrayList<AppServiceHostServiceAPI> svcApiRelations = new ArrayList<>();
         ArrayList<AppServiceInvokeServiceAPI> svcInvokeApiRelations = new ArrayList<>();
-        getServiceHostApiAndServiceInvokeApi(svcApiRelations, svcInvokeApiRelations, now);
+        getServiceHostApiAndServiceInvokeApiZipkin(svcApiRelations, svcInvokeApiRelations, now);
+        //向对面提交一堆并处理结果
+        ArrayList<AppServiceHostServiceAPI> updatedSvcApiRelations = restTemplate.postForObject(
+                neo4jDaoIP + "/apiHostService", svcApiRelations, svcApiRelations.getClass());
+        ArrayList<AppServiceInvokeServiceAPI> updatedSvcInvokeApiRelations = restTemplate.postForObject(
+                neo4jDaoIP + "/apiInvokeService", svcInvokeApiRelations, svcInvokeApiRelations.getClass());
+        System.out.println("API->Host 数量:" + apis.size());
+    }
+
+    //从Trace中抽取API和Service之间的关系并上传
+    //可以从Trace中抽取出API所属于哪个Service以及API被哪些Service调用过
+    //这些信息的统计量将会被上传到图中
+    //上传的是统计量而不是Trace本身
+    public void uploadApiSvcRelationsSkywalking(Date now){
+        ArrayList<AppServiceHostServiceAPI> svcApiRelations = new ArrayList<>();
+        ArrayList<AppServiceInvokeServiceAPI> svcInvokeApiRelations = new ArrayList<>();
+        getServiceHostApiAndServiceInvokeApiSkywalking(svcApiRelations, svcInvokeApiRelations, now);
         //向对面提交一堆并处理结果
         ArrayList<AppServiceHostServiceAPI> updatedSvcApiRelations = restTemplate.postForObject(
                 neo4jDaoIP + "/apiHostService", svcApiRelations, svcApiRelations.getClass());
@@ -242,12 +326,12 @@ public class DataCollectorService {
 
     //提供一个Trace 从中抽取出API与Pod之间关系
     //抽取结果的容器也在参数中
-    public void getTraceInvokeInformation(ArrayList<Span> trace, ArrayList<TraceInvokeApiToPod> traceApiToPod, ArrayList<TraceInvokePodToApi> tracePodToApi){
+    public void getTraceInvokeInformationZipkin(ArrayList<ZipkinSpan> trace, ArrayList<TraceInvokeApiToPod> traceApiToPod, ArrayList<TraceInvokePodToApi> tracePodToApi){
         //统计一个个的span对API的调用时长的和调用发起的时间的
         HashMap<String, TreeMap<Long, Double>> apiMetricsMap = new HashMap<>();
 
         //遍历一个trace的每一个span
-        for(Span span : trace) {
+        for(ZipkinSpan span : trace) {
             //istio的输出信息不是我们需要的 忽略
             if (span.getName().contains("istio-policy")) {
                 continue;
@@ -344,6 +428,117 @@ public class DataCollectorService {
         handleApiMetrics(apiMetricsMap);
     }
 
+    //提供一个Trace 从中抽取出API与Pod之间关系
+    //抽取结果的容器也在参数中
+    //如果SplitApi为True则调用分为3阶段pod->exit API->entry API ->pod,否则为2阶段
+    public void getTraceInvokeInformationSkywalking(SimpleTrace trace, ArrayList<TraceInvokeApiToPod> traceApiToPod, ArrayList<TraceInvokePodToApi> tracePodToApi, ArrayList<TraceInvokeApiToApi> traceApiToApi, Boolean splitApi){
+        //统计一个个的span对API的调用时长的和调用发起的时间的
+//        HashMap<String, TreeMap<Long, Double>> apiMetricsMap = new HashMap<>();
+        HashMap<String, ServiceAPI> spanIdAPI = new HashMap<>();
+        HashMap<String, Integer> spanIdTraceInvokePodToApi = new HashMap<>();
+        //遍历一个trace的每一个span
+        for(SkywalkingSpan span : trace.getTrace().getSpans()) {
+            //开始处理我们需要的内容
+            //找到key=http.url的那个binary-annotation与key: "node_id" 从node_id中提取podId
+            String api;
+            if(span.getEndpointName().startsWith("MongoDB"))
+                api = span.getServiceCode() + ":" + span.getEndpointName();
+            else
+                api = span.getEndpointName();
+
+            String apiHostService = span.getServiceCode();
+            String serviceIntanceName = span.getServiceInstanceName();
+            String podIP = serviceIntanceName.substring(serviceIntanceName.indexOf('@')+1);
+
+            //将trace的两部分组装好
+            //看下API在吗，不在的话重组一个
+            //System.out.println("Trace复现过程中发现API " + api);
+            Pod pod = IPpods.get(podIP);
+            if(pod == null){
+                System.out.println("[意外情况]Pod找不到 此Trace将被跳过 PodIP：" + podIP);
+                continue;
+            }
+
+            ServiceAPI serviceApi;
+            if(apis.get(api) != null){
+                serviceApi = apis.get(api);
+            }else{
+                serviceApi = new ServiceAPI();
+                serviceApi.setHostName(apiHostService);
+                serviceApi.setName(api);
+                //API的ID就是API的名字
+                serviceApi.setId(api);
+                serviceApi.setLatestUpdateTimestamp(currTimestampString);
+                serviceApi.setCreationTimestamp(currTimestampString);
+                apis.put(serviceApi.getName(), serviceApi);
+            }
+            spanIdAPI.put(span.getTraceId() + "." + span.getSegmentId() + "." + span.getSpanId(), serviceApi);
+
+
+            if(span.getType().equals("Exit")){
+                //创建一个Pod指向exit API的连接
+                TraceInvokePodToApi traceInvokePodToApi = new TraceInvokePodToApi();
+                traceInvokePodToApi.setId(pod.getId() + "_" + serviceApi.getId());
+                traceInvokePodToApi.setPod(pod);
+                traceInvokePodToApi.setServiceAPI(serviceApi);
+                traceInvokePodToApi.setRelation("TRACE");
+
+                HashSet<String> passingTracesAndSpans = new HashSet<>();
+                passingTracesAndSpans.add(span.getTraceId() + "." + span.getSegmentId() + "." + span.getSpanId());
+
+                //Metric - duration处理api调用时间长度的问题
+                //Metric -> Api
+//                TreeMap<Long, Double> apiTimeMetricMap = apiMetricsMap.getOrDefault(serviceApi.getName(), new TreeMap<>());
+//                apiTimeMetricMap.put(span.getStartTime(), (double)(span.getEndTime()-span.getStartTime()));
+//                apiMetricsMap.put(serviceApi.getName(), apiTimeMetricMap);
+                traceInvokePodToApi.setTraceIdAndSpanIds(passingTracesAndSpans);
+                tracePodToApi.add(traceInvokePodToApi);
+                spanIdTraceInvokePodToApi.put(span.getTraceId() + "." + span.getSegmentId() + "." + span.getSpanId(), tracePodToApi.size()-1);
+            }else if(span.getType().equals("Entry")){
+                //创建一个Entry API指向pod的连接
+                TraceInvokeApiToPod traceInvokeApiToPod = new TraceInvokeApiToPod();
+                traceInvokeApiToPod.setId(serviceApi.getId() + "_" + pod.getId());
+                traceInvokeApiToPod.setPod(pod);
+                traceInvokeApiToPod.setServiceAPI(serviceApi);
+                traceInvokeApiToPod.setRelation("TRACE");
+
+                HashSet<String> passingTracesAndSpans = new HashSet<>();
+                passingTracesAndSpans.add(span.getTraceId() + "." + span.getSegmentId() + "." + span.getSpanId());
+                traceInvokeApiToPod.setTraceIdAndSpanIds(passingTracesAndSpans);
+                traceApiToPod.add(traceInvokeApiToPod);
+
+                //Metric - duration处理api调用时间长度的问题
+                //Metric -> Api
+//                TreeMap<Long, Double> apiTimeMetricMap = apiMetricsMap.getOrDefault(serviceApi.getName(), new TreeMap<>());
+//                apiTimeMetricMap.put(span.getStartTime(), (double)(span.getEndTime()-span.getStartTime()));
+//                apiMetricsMap.put(serviceApi.getName(), apiTimeMetricMap);
+
+                // 创建一个Exit API指向Entry API的连接
+                if(!span.getRefs().isEmpty()) {
+                    String parentSpan = span.getRefs().get(0).getTraceId() + "." + span.getRefs().get(0).getParentSegmentId() + "." + span.getRefs().get(0).getParentSpanId();
+                    if(splitApi) {
+                        TraceInvokeApiToApi traceInvokeApiToApi = new TraceInvokeApiToApi();
+                        traceInvokeApiToApi.setId(spanIdAPI.get(parentSpan).getId() + "_" + serviceApi.getId());
+                        traceInvokeApiToApi.setServiceAPIFrom(spanIdAPI.get(parentSpan));
+                        traceInvokeApiToApi.setServiceAPITo(serviceApi);
+                        traceInvokeApiToApi.setRelation("TRACE");
+                        traceApiToApi.add(traceInvokeApiToApi);
+                    }else{
+                        //修改PodToApi
+                        TraceInvokePodToApi traceInvokePodToApi = tracePodToApi.get(spanIdTraceInvokePodToApi.get(parentSpan));
+                        traceInvokePodToApi.getServiceAPI().setName(api);
+                        traceInvokePodToApi.getServiceAPI().setId(api);
+                        traceInvokePodToApi.getServiceAPI().setHostName(apiHostService);
+                        traceInvokePodToApi.getServiceAPI().setLatestUpdateTimestamp(currTimestampString);
+                    }
+                }
+            }
+
+        }
+
+        //处理一下span响应时间的问题
+//        handleApiMetrics(apiMetricsMap);
+    }
 
     private void handleApiMetrics(HashMap<String, TreeMap<Long, Double>> apiMetricsMap){
 
@@ -399,21 +594,21 @@ public class DataCollectorService {
             restTemplate.postForObject(neo4jDaoIP + "/serviceApiMetrics", relations, relations.getClass());
         }
 
-        restTemplate.postForObject(graphAppIp + "/abnormality/apiList", apiMetricIds, String.class);
+//        restTemplate.postForObject(graphAppIp + "/abnormality/apiList", apiMetricIds, String.class);
     }
 
 
 
     //收集所有的Trace 解析服务及其API 以及服务与API的调用关系
     //抽取结果放进了参数中提供的容器中
-    public void getServiceHostApiAndServiceInvokeApi(ArrayList<AppServiceHostServiceAPI> svcHostApi,
+    public void getServiceHostApiAndServiceInvokeApiZipkin(ArrayList<AppServiceHostServiceAPI> svcHostApi,
                                                      ArrayList<AppServiceInvokeServiceAPI> svcInvokeApi,
                                                      Date now){
         //获取trace
-        ArrayList<ArrayList<Span>> traces = getAndParseTrace(now);
+        ArrayList<ArrayList<ZipkinSpan>> traces = getAndParseTraceZipkin();
         System.out.println("Trace数量:" + traces.size());
         //遍历每一个trace
-        for(ArrayList<Span> trace : traces){
+        for(ArrayList<ZipkinSpan> trace : traces){
 
             if(tracesRecord.contains(trace.get(0).getTraceId())){
                 continue;
@@ -421,7 +616,7 @@ public class DataCollectorService {
                 tracesRecord.add(trace.get(0).getTraceId());
             }
             //遍历一个trace的每一个span
-            for(Span span : trace){
+            for(ZipkinSpan span : trace){
                 //istio的输出信息不是我们需要的 忽略
                 if(span.getName().contains("istio-policy")){
                     continue;
@@ -491,6 +686,81 @@ public class DataCollectorService {
         }
     }
 
+
+    //收集所有的Trace 解析服务及其API 以及服务与API的调用关系
+    //抽取结果放进了参数中提供的容器中
+    public void getServiceHostApiAndServiceInvokeApiSkywalking(ArrayList<AppServiceHostServiceAPI> svcHostApi,
+                                                           ArrayList<AppServiceInvokeServiceAPI> svcInvokeApi,
+                                                           Date now){
+        //获取trace
+        ArrayList<SimpleTrace> traces = getAndParseTraceSkywalking(now);
+        System.out.println("Trace数量:" + traces.size());
+        //遍历每一个trace
+        for(SimpleTrace trace : traces){
+
+            if(tracesRecord.contains(trace.getTraceIds().get(0))){
+                continue;
+            }else{
+                tracesRecord.add(trace.getTraceIds().get(0));
+            }
+            //遍历一个trace的每一个span
+            for(SkywalkingSpan span : trace.getTrace().getSpans()){
+                //开始处理我们需要的内容
+                //找到key=http.url的那个binary-annotation
+                if(span.getType().equals("Exit")){
+
+                    //解析出API所在的服务名,调用API的服务名以及API本身的名称
+                    String invokeService = span.getPeer();
+                    String hostService = span.getServiceCode();
+                    String api = span.getEndpointName();
+                    //开头是ip的不要 服务指向自己的也不要
+                    if(invokeService.equals(hostService)){
+                        continue;
+                    }
+                    //看下API在吗，不在的话重组一个
+                    ServiceAPI serviceApi;
+                    if(apis.get(api) != null){
+                        serviceApi = apis.get(api);
+                        serviceApi.setLatestUpdateTimestamp(currTimestampString);
+                    }else{
+                        serviceApi = new ServiceAPI();
+                        serviceApi.setHostName(hostService);
+                        serviceApi.setName(api);
+                        //API的ID就是API的名字
+                        serviceApi.setId(api);
+                        serviceApi.setLatestUpdateTimestamp(currTimestampString);
+                        serviceApi.setCreationTimestamp(currTimestampString);
+                        apis.put(serviceApi.getName(), serviceApi);
+                    }
+
+                    //看看host serivice在吗 不在的话就不管了 在的话组装一下relation
+                    if(svcs.get(hostService)!= null){
+                        AppService hostSvc = svcs.get(hostService);
+                        AppServiceHostServiceAPI relationHost = new AppServiceHostServiceAPI();
+                        relationHost.setAppService(hostSvc);
+                        relationHost.setServiceAPI(serviceApi);
+                        relationHost.setId(serviceApi.getId() + "ApiSvc" + hostSvc.getId());
+                        relationHost.setRelation("API_HOST_ON");
+                        svcHostApi.add(relationHost);
+                    }
+
+                    //看看invoke service在吗 不在的话就不管了 在的话组装一下relation
+                    if(svcs.get(invokeService)!= null){
+                        AppService invokeSvc = svcs.get(invokeService);
+                        AppServiceInvokeServiceAPI relationInvoke = new AppServiceInvokeServiceAPI();
+                        relationInvoke.setAppService(invokeSvc);
+                        relationInvoke.setServiceAPI(serviceApi);
+                        relationInvoke.setCount(1);
+                        relationInvoke.setId(serviceApi.getId() + "ApiSvc" + invokeSvc.getId());
+                        relationInvoke.setRelation("API_INVOKE_BY");
+                        svcInvokeApi.add(relationInvoke);
+                    }
+                }
+            }
+        }
+    }
+
+
     //从一个链接中提取API名称
     private String getApiFromLink(String url){
         return MatcherUrlRouterUtil.matcherPattern(url);
@@ -535,7 +805,7 @@ public class DataCollectorService {
                     newMetrics.add(metric);
 
                 }catch (Exception e){
-                    System.out.println("[错误]为查到此容器的此Metric 容器名称:" + containerName + " Metric名称:" +containerMetricName);
+                    System.out.println("[错误]未查到此容器的此Metric 容器名称:" + containerName + " Metric名称:" +containerMetricName);
                 }
             }
         }
@@ -550,17 +820,17 @@ public class DataCollectorService {
 
         String queryStr = metricName + "{" + "name=" + "\"" + containerName + "\"" + "}";
         MultiValueMap<String, Object> postParameters = new LinkedMultiValueMap<>();
-        System.out.println(queryStr);
         postParameters.add("query", queryStr);
         HashMap<String, String> getParameters = new HashMap<>();
         getParameters.put("query", queryStr);
         HttpHeaders headers = new HttpHeaders();
         headers.add("Content-Type", "application/x-www-form-urlencoded");
         HttpEntity<MultiValueMap<String, Object>> r = new HttpEntity<>(postParameters, headers);
-//        String str = restTemplate.postForObject(promethsusQuery,r,String.class);
         String str = restTemplate.getForObject(promethsusQuery + "?query={query}", String.class, getParameters);
+//        System.out.println(str);
         if(str.contains("\"resultType\":\"vector\"")){
             ExpressionQueriesVectorResponse res = gson.fromJson(str,ExpressionQueriesVectorResponse.class);
+
             return res;
         }else{
             System.out.println("[错误]Promethsus数据不合规 无法解析");
@@ -676,7 +946,7 @@ public class DataCollectorService {
         for(PodAndMetric pm : list) {
             podMetricIds.add(pm.getPodMetric().getId());
         }
-        restTemplate.postForObject(graphAppIp + "/abnormality/podList",podMetricIds, String.class);
+//        restTemplate.postForObject(graphAppIp + "/abnormality/podList",podMetricIds, String.class);
 
         System.out.println("上传Pod Metrics完毕");
     }
@@ -688,16 +958,10 @@ public class DataCollectorService {
                 try{
                     String queryStr = podMetricName +
                             "{" +
-                            "pod=" + "\"" + pod.getName() + "\"," +
-                            "name=\"\"" +
-                            "}";
-
-                    MultiValueMap<String, Object> postParameters = new LinkedMultiValueMap<>();
-                    postParameters.add("query", queryStr);
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.add("Content-Type", "application/x-www-form-urlencoded");
-                    HttpEntity<MultiValueMap<String, Object>> r = new HttpEntity<>(postParameters, headers);
-                    String str = restTemplate.postForObject(promethsusQuery,r,String.class);
+                            "pod=" + "\"" + pod.getName() + "\"}";
+                    HashMap<String, String> getParameters = new HashMap<>();
+                    getParameters.put("query", queryStr);
+                    String str = restTemplate.getForObject(promethsusQuery + "?query={query}",String.class, getParameters);
                     if(str.contains("\"resultType\":\"vector\"")){
                         ExpressionQueriesVectorResponse res = gson.fromJson(str,ExpressionQueriesVectorResponse.class);
 
@@ -740,7 +1004,10 @@ public class DataCollectorService {
         System.out.println("postVmAndPodList传输完毕");
         for(VirtualMachineAndPod relation : result){
             vms.put(relation.getVirtualMachine().getName(), relation.getVirtualMachine());
-            pods.put(relation.getPod().getName(), relation.getPod());
+            if(relation.getPod().getPodIP()!=null) {
+                pods.put(relation.getPod().getName(), relation.getPod());
+                IPpods.put(relation.getPod().getPodIP(), relation.getPod());
+            }
         }
         return result;
     }
@@ -752,7 +1019,10 @@ public class DataCollectorService {
         System.out.println("postSvcAndPodList传输完毕");
         for(AppServiceAndPod relation : result){
             svcs.put(relation.getAppService().getName(), relation.getAppService());
-            pods.put(relation.getPod().getName(), relation.getPod());
+            if(relation.getPod().getPodIP()!=null) {
+                pods.put(relation.getPod().getName(), relation.getPod());
+                IPpods.put(relation.getPod().getPodIP(), relation.getPod());
+            }
         }
         return result;
     }
@@ -764,7 +1034,10 @@ public class DataCollectorService {
 
         System.out.println("postPodAndContainerList传输完毕");
         for(PodAndContainer relation : result){
-            pods.put(relation.getPod().getName(), relation.getPod());
+            if(relation.getPod().getPodIP()!=null) {
+                pods.put(relation.getPod().getName(), relation.getPod());
+                IPpods.put(relation.getPod().getPodIP(), relation.getPod());
+            }
             containers.put(relation.getContainer().getName(), relation.getContainer());
         }
         return result;
@@ -793,7 +1066,10 @@ public class DataCollectorService {
                 MetricAndContainer relation;
                 //抽取container_memory_usage_bytes
                 relation = assembleMetricAndContainer(containerMetricName, containerName, container);
-                relations.add(relation);
+                if(relation!=null) {
+                    relations.add(relation);
+//                    System.out.println(relation.getMetric().getName());
+                }
             }
         }
         return relations;
