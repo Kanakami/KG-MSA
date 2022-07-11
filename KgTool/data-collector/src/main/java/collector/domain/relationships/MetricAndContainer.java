@@ -14,6 +14,14 @@ public class MetricAndContainer extends BasicRelationship {
         super();
     }
 
+    public MetricAndContainer(Metric metric, Container container, String id, String relation){
+        super();
+        this.setMetric(metric);
+        this.setContainer(container);
+        this.setId(id);
+        this.setRelation(relation);
+    }
+
     public Metric getMetric() {
         return metric;
     }

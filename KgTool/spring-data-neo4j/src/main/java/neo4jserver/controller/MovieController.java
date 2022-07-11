@@ -164,6 +164,11 @@ public class MovieController {
 		return movieService.postVirtualMachineAndPodList(relations);
 	}
 
+	@PostMapping("/metricAndVirtualMachine")
+	public ArrayList<MetricAndVirtualMachine> postMetricAndVirtualMachine(@RequestBody ArrayList<MetricAndVirtualMachine> relations){
+		return movieService.postMetricAndVirtualMachine(relations);
+	}
+
 	@GetMapping("/metricAndContainer/{id}")
 	public MetricAndContainer getMetricAndContainer(@PathVariable String id){
 		return movieService.findByMetricAndContainerId(id);
@@ -177,6 +182,11 @@ public class MovieController {
 	@PostMapping("/metricAndContainerRelations")
 	public ArrayList<MetricAndContainer> postMetricAndContainer(@RequestBody  ArrayList<MetricAndContainer> relations){
 		return movieService.postMetricAndContainerList(relations);
+	}
+
+	@PostMapping("/metricAndAlertRule")
+	public ArrayList<MetricAndAlertRules> postMetricAndAlertRule(@RequestBody ArrayList<MetricAndAlertRules> relations){
+		return movieService.postMetricAndAlertRules(relations);
 	}
 
 

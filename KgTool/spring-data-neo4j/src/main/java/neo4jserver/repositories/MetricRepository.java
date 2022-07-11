@@ -19,7 +19,7 @@ public interface MetricRepository extends Neo4jRepository<Metric, Long> {
 
 
     @Query("MATCH (n:Metric) where id(n)={0} return labels(n) as labels, n as node")
-    MetricResult getContainerWithLabels(Long id);
+    MetricResult getMetricWithLabels(Long id);
 
     @Query("MATCH (n:Metric) return n")
     ArrayList<Metric> findAllMetrics();

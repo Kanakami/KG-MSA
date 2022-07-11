@@ -9,7 +9,9 @@ import collector.domain.apipod.PodList;
 import collector.domain.apiservice.ApiAppService;
 import collector.domain.apiservice.AppServiceList;
 import collector.domain.entities.*;
+import collector.domain.prom.ExpressionQueriesLabelsResponse;
 import collector.domain.prom.ExpressionQueriesVectorResponse;
+import collector.domain.prom.ResultVector;
 import collector.domain.relationships.*;
 import collector.domain.skywalkingTrace.*;
 import collector.domain.trace.BinaryAnnotation;
@@ -21,6 +23,11 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
+import javafx.scene.control.Alert;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -73,6 +80,8 @@ public class DataCollectorService {
     @Value("${promethesus.pod.metrics}")
     private String[] podMetricNames;
 
+    private ArrayList<String> metricsName;
+
     //时间戳 在图谱更新的时候会附加在节点上
     //在图谱重整的时候此值将会被刷新
     //在更新Metric的时候这个值不会刷新
@@ -87,11 +96,13 @@ public class DataCollectorService {
     private static ConcurrentHashMap<String, Container> containers = new ConcurrentHashMap<>();
     //放的是name到实体的映射
     private static ConcurrentHashMap<String, ServiceAPI> apis = new ConcurrentHashMap<>();
+    //记录指标名对应的指标实体
+    private static ConcurrentHashMap<String, Metric> metrics = new ConcurrentHashMap<>();
     //记录已经统计过 服务间调用数量 的Trace
     private static HashSet<String> tracesRecord = new HashSet<>();
     //记录一个个上传到数据库的Trace
     private static HashSet<String> uploadedTraces = new HashSet<>();
-
+    private static HashMap<String, VirtualMachine> IPToVM = new HashMap<>();
     @Autowired
     private RestTemplate restTemplate;
     @Autowired
@@ -133,16 +144,16 @@ public class DataCollectorService {
         }
     }
 
-    //平均耗时14秒
-    @Scheduled(initialDelay=100000, fixedDelay =150000)
-    public void updateMetricsPeriodly() {
-        synchronized (objLockForPeriodly) {
-            System.out.println("[开始]定期刷新应用指标数据 现在时间：" + dateFormat.format(new Date()));
-            updateMetrics();
-            uploadPodMetrics();
-            System.out.println("[完成]定期刷新应用指标数据 现在时间：" + dateFormat.format(new Date()));
-        }
-    }
+//    //平均耗时14秒
+//    @Scheduled(initialDelay=100000, fixedDelay =150000)
+//    public void updateMetricsPeriodly() {
+//        synchronized (objLockForPeriodly) {
+//            System.out.println("[开始]定期刷新应用指标数据 现在时间：" + dateFormat.format(new Date()));
+//            updateMetrics();
+//            uploadPodMetrics();
+//            System.out.println("[完成]定期刷新应用指标数据 现在时间：" + dateFormat.format(new Date()));
+//        }
+//    }
 
     public String getCurrentTimestamp(){
         return currTimestampString;
@@ -864,6 +875,95 @@ public class DataCollectorService {
         return containerList;
     }
 
+    public ArrayList<AlertRule> getAlertRules(){
+        //获取prometheus Alert页面的html进行爬虫解析
+        String html = restTemplate.getForObject(promethsusQuery.substring(0,promethsusQuery.length()-12) + "alerts",String.class);
+        Document document = Jsoup.parse(html);
+        Elements divs = document.getElementsByTag("div");
+        ArrayList<AlertRule> alertRules = new ArrayList<>();
+        for(Element div: divs){
+            if(!div.text().startsWith("alert: "))
+                continue;
+            //一行行处理
+            AlertRule alertRule = new AlertRule();
+            for(String line: div.text().split("\n")){
+                if(line.startsWith("alert"))
+                    alertRule.setName(line.substring(7));
+                else if(line.startsWith("expr"))
+                    alertRule.setExpr(line.substring(6));
+                else if(line.startsWith("for"))
+                    alertRule.setDuration(line.substring(5));
+                else if(line.startsWith("  severity"))
+                    alertRule.setSeverity(line.substring(12));
+            }
+            alertRule.setId(alertRule.getName() + "_Severity_" + alertRule.getSeverity());
+            //处理metric：剔除{}、[]部分，剔除保留字irate、rate，剔除字符
+            String expr = alertRule.getExpr();
+            String metricName;
+            int start = 0;
+            for(int i=0;i<expr.length();i++){
+                if(expr.charAt(i)=='i'&&expr.substring(i,Math.min(i+6, expr.length())).equals("irate(")){
+                    i+=5;
+                    start = i + 1;
+                }else if(expr.charAt(i)=='r'&&expr.substring(i,Math.min(i+5, expr.length())).equals("rate(")){
+                    i+=4;
+                    start = i + 1;
+                }else if(!(expr.charAt(i)>='a'&&expr.charAt(i)<='z')&&!(expr.charAt(i)>='A'&&expr.charAt(i)<='Z')&&!(expr.charAt(i)=='_')&&!(expr.charAt(i)>='0'&&expr.charAt(i)<='9')){
+                    //既不是小写字母，又不是大写字母，也不是_，也不是数字
+                    if(start!=i) {
+                        metricName = expr.substring(start, i);
+                        // 纯数字不是指标名称
+                        boolean isPureDigit = true;
+                        for(int j=0;j<metricName.length();j++){
+                            if(metricName.charAt(j)<'0'||metricName.charAt(j)>'9'){
+                                isPureDigit = false;
+                                break;
+                            }
+                        }
+                        if(!isPureDigit) {
+                            alertRule.getMetric().add(new MetricSearch());
+                            alertRule.getMetric().get(alertRule.getMetric().size()-1).setName(metricName);
+                        }
+                    }
+                    if(expr.charAt(i)=='{'){
+                        int end = expr.indexOf('}', i);
+                        String[] searchkeyToValue = expr.substring(i+1, end).split("=|,|!~");
+                        HashMap<String, String> search = new HashMap<>();
+                        for(int j=0;j<searchkeyToValue.length;j+=2){
+                            search.put(searchkeyToValue[j], searchkeyToValue[j+1]);
+                        }
+                        alertRule.getMetric().get(alertRule.getMetric().size()-1).setSearchKeyToValue(search);
+                        i = end;
+                        start = i + 1;
+                    }else if(expr.charAt(i)=='['){
+                        i = expr.indexOf(']', i);
+                        start = i + 1;
+                    }
+                    else
+                        start = i + 1;
+                }
+            }
+            if(start!=expr.length()){
+                metricName = expr.substring(start);
+                // 纯数字不是指标名称
+                boolean isPureDigit = true;
+                for(int j=0;j<metricName.length();j++){
+                    if(metricName.charAt(j)<'0'||metricName.charAt(j)>'9'){
+                        isPureDigit = false;
+                        break;
+                    }
+                }
+                if(!isPureDigit) {
+                    alertRule.getMetric().add(new MetricSearch());
+                    alertRule.getMetric().get(alertRule.getMetric().size()-1).setName(metricName);
+                }
+            }
+            alertRules.add(alertRule);
+        }
+        return alertRules;
+    }
+
+
     public NodeList getNodeList(){
         String list = restTemplate.getForObject( masterIP + "/api/v1/nodes", String.class);
         NodeList nodeList = gson.fromJson(list,NodeList.class);
@@ -903,6 +1003,10 @@ public class DataCollectorService {
         System.out.println("Get Service");
         ArrayList<ApiContainer> apiContainerList = getContainerList().getItems();
         System.out.println("Get Container");
+        //获取告警规则
+        ArrayList<AlertRule> alertRuleList = getAlertRules();
+        System.out.println("Get AlertRules");
+
         //第二步: 构建关系
         ArrayList<VirtualMachineAndPod> vmPodRelations = constructVmPodRelation(apiNodeList,apiPodList);
         System.out.println("vmPodRelations");
@@ -910,8 +1014,7 @@ public class DataCollectorService {
         System.out.println("appServiceAndPodRelations");
         ArrayList<PodAndContainer> podAndContainerRelations = constructPodAndContainerRelation(apiPodList,apiContainerList);
         System.out.println("podAndContainerRelations");
-        ArrayList<MetricAndContainer> metricAndContainerRelations = constructMetricAndContainer(apiContainerList);
-        System.out.println("metricAndContainerRelations");
+
         //第三步: 上传关系(无需额外上传entity, 关系中包含entity, 对面会自动处理)
         ArrayList<VirtualMachineAndPod> vmPodRelationsResult;
         vmPodRelationsResult = postVmAndPodList(vmPodRelations);
@@ -925,15 +1028,313 @@ public class DataCollectorService {
         podAndContainerResult = postPodAndContainerList(podAndContainerRelations);
         System.out.println("完成上传PodAndContainer:" + podAndContainerResult.size());
 
-        ArrayList<MetricAndContainer> metricAndContainerResult;
-        metricAndContainerResult = postMetricAndContainerList(metricAndContainerRelations);
-        System.out.println("完成上传MetricAndContainer:" + metricAndContainerResult.size());
+        //先获取Prometheus拥有的所有指标
+        getAllMetricsName();
+        //构建Metric与其他节点的关系
+        ArrayList<PodAndMetric> podAndMetrics = new ArrayList<>();
+        ArrayList<MetricAndContainer> metricAndContainers = new ArrayList<>();
+        ArrayList<MetricAndVirtualMachine> metricAndVirtualMachines = new ArrayList<>();
+        constructMetricAndOthers(podAndMetrics, metricAndContainers, metricAndVirtualMachines);
+        System.out.println("Pod与metric关系共" + podAndMetrics.size() + "个");
+        System.out.println("Metric与Container关系共" + metricAndContainers.size() + "个");
+        System.out.println("Metric与节点（虚拟机）关系共" + metricAndVirtualMachines.size() + "个");
+//        ArrayList<MetricAndContainer> metricAndContainerRelations = constructMetricAndContainer(apiContainerList);
+        System.out.println("metricAndOthersRelations");
+        //构建Metric与告警规则的关系
+        ArrayList<MetricAndAlertRule> metricAndAlertRules = constructMetricAndAlertRules(alertRuleList);
+        System.out.println("metricAndAlertRulesRelations");
 
+        ArrayList<MetricAndContainer> metricAndContainerResult = postMetricAndContainerList(metricAndContainers);
+        ArrayList<PodAndMetric> podAndMetricArrayList = postPodAndMetricList(podAndMetrics);
+        ArrayList<MetricAndVirtualMachine> metricAndVirtualMachineResult = postMetricAndVirtualMachine(metricAndVirtualMachines);
+//        metricAndContainerResult = postMetricAndContainerList(metricAndContainerRelations);
+
+        System.out.println("完成上传MetricAndContainer:" + metricAndContainerResult.size());
+        System.out.println("完成上传MetricAndPod:" + podAndMetricArrayList.size());
+        System.out.println("完成上传MetricAndVirtualMachine:" + metricAndVirtualMachineResult.size());
+
+        ArrayList<MetricAndAlertRule> metricAndAlertRuleArrayList = postMetricAndAlertRule(metricAndAlertRules);
+        System.out.println("完成上传MetricAndAlertRule:" + metricAndAlertRuleArrayList.size());
         System.out.println("虚拟机数量:" + vms.size());
         System.out.println("服务数量:" + svcs.size());
         System.out.println("Pod数量:" + pods.size());
         System.out.println("容器数量:" + containers.size());
         return "";
+    }
+
+    public void getAllMetricsName(){
+        String url = promethsusQuery.substring(0, promethsusQuery.length()-5) + "label/__name__/values?_=1657276036988";
+        String res = restTemplate.getForObject(url, String.class);
+        ExpressionQueriesLabelsResponse expressionQueriesLabelsResponse = gson.fromJson(res, ExpressionQueriesLabelsResponse.class);
+        metricsName = expressionQueriesLabelsResponse.getData();
+    }
+
+    public ArrayList<MetricAndAlertRule> constructMetricAndAlertRules(ArrayList<AlertRule> alertRules){
+        //避免重复的关系
+        HashSet<String> relations = new HashSet<>();
+        ArrayList<MetricAndAlertRule> metricAndAlertRules = new ArrayList<>();
+        //获取ApiServer, Prometheus的Pod
+        String apiserverPodName = null, prometheusPodName = null;
+        for(String key: pods.keySet()){
+            if(key.startsWith("kube-apiserver")){
+                apiserverPodName = key;
+            }
+            if(key.startsWith("prometheus")){
+                prometheusPodName = key;
+            }
+        }
+        //根据告警规则寻找告警规则相应的指标
+        for(AlertRule alertRule: alertRules){
+            for(MetricSearch metricSearch: alertRule.getMetric()){
+                StringBuilder query = new StringBuilder(metricSearch.getName() + "{");
+                if(metricSearch.getSearchKeyToValue().containsKey("job"))
+                    query.append("job=").append(metricSearch.getSearchKeyToValue().get("job")).append(",");
+                if(metricSearch.getSearchKeyToValue().containsKey("instance"))
+                    query.append("instance=").append(metricSearch.getSearchKeyToValue().get("instance")).append(",");
+                if(metricSearch.getSearchKeyToValue().containsKey("pod"))
+                    query.append("pod=").append(metricSearch.getSearchKeyToValue().get("pod")).append(",");
+                if(metricSearch.getSearchKeyToValue().containsKey("name"))
+                    query.append("name=").append(metricSearch.getSearchKeyToValue().get("name")).append(",");
+                query.append("}");
+                try {
+                    String str = restTemplate.getForObject(promethsusQuery + "?query={query}", String.class, query);
+                    if (str.contains("\"resultType\":\"vector\"")) {
+                        ExpressionQueriesVectorResponse expressionQueriesVectorResponse = gson.fromJson(str, ExpressionQueriesVectorResponse.class);
+                        for(ResultVector resultVector: expressionQueriesVectorResponse.getData().getResult()){
+                            if(resultVector.getMetric().containsKey("job")){
+                                String metricId = null;
+                                if(resultVector.getMetric().get("job").equals("kubernetes-apiservers")){
+                                    //全部和kube-apiserver的Pod关联
+                                    if(apiserverPodName!=null){
+                                        metricId = metricSearch.getName() + "_" + apiserverPodName;
+                                    }
+                                }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes-kubelet")){
+                                    //只有和主机相连的情况
+                                    metricId = metricSearch.getName() + "_" + resultVector.getMetric().get("instance");
+
+                                }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes-cadvisor")){
+                                    //可能和主机相连也可能和容器连接
+                                    if(!resultVector.getMetric().containsKey("pod")||resultVector.getMetric().get("pod").equals("")){
+                                        metricId = metricSearch.getName() + "_" + resultVector.getMetric().get("instance");
+                                    }else{
+                                        if(resultVector.getMetric().get("name").equals("")){
+                                            //和pod连
+                                            metricId = metricSearch.getName() + "_" + resultVector.getMetric().get("pod");
+                                        }else{
+                                            //和容器连
+                                            metricId = metricSearch.getName() + "_" + resultVector.getMetric().get("name");
+                                        }
+                                    }
+                                }else if(resultVector.getMetric().get("job").equals("kubernetes-service-endpoints")){
+                                    //和Pod连，instance为pod IP
+                                    String instance = resultVector.getMetric().get("instance");
+                                    String IP = instance.substring(0, instance.indexOf(":"));
+                                    if(IPpods.containsKey(IP)){
+                                        //指标与该pod相连
+                                        metricId = metricSearch.getName() + "_" + IPpods.get(IP).getId();
+                                    }else{
+                                        System.out.println("Job kubernetes-service-endpoints's instance " + IP + " doesn't exist.");
+                                    }
+                                }else if(resultVector.getMetric().get("job").equals("prometheus")){
+                                    //只和prometheus的Pod相连
+                                    if(prometheusPodName!=null) {
+                                        metricId = metricSearch.getName() + "_" + prometheusPodName;
+
+                                    }
+                                }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes")){
+                                    String instance = resultVector.getMetric().get("instance");
+                                    String IP = instance.substring(0, instance.indexOf(":"));
+                                    //与主机连接
+                                    metricId = metricSearch.getName() + "_" + IPToVM.get(IP).getId();
+                                }else if(resultVector.getMetric().get("job").equals("kubernetes-pods")){
+                                    //与pod相连
+                                    String podName = resultVector.getMetric().get("kubernetes_pod_name");
+                                    metricId = metricSearch.getName() + "_" + podName;
+                                }
+                                String relationId = alertRule.getId() + "_" + metricId;
+                                if(!relations.contains(relationId)) {
+                                    relations.add(relationId);
+                                    metricAndAlertRules.add(new MetricAndAlertRule(metrics.get(metricId), alertRule, alertRule.getId() + "_AlertRuleAndMetric_" + metricId, "Alert_INFO"));
+                                }
+                            }else{
+                                System.out.println("Metric: "+ metricSearch.getName() + "doesn't belong to any job.");
+                            }
+                        }
+                    }else{
+                        System.out.println("[错误]Promethesus数据不合规 无法解析");
+                    }
+                }catch (Exception e){
+                    System.out.println("[错误]未查到此Metric Metric名称:" + metricSearch.getName());
+                }
+            }
+        }
+        return metricAndAlertRules;
+    }
+
+    public void constructMetricAndOthers(ArrayList<PodAndMetric> podAndMetrics, ArrayList<MetricAndContainer> metricAndContainers, ArrayList<MetricAndVirtualMachine> metricAndVirtualMachines){
+        //甄别metric是否已经查询过
+        HashSet<String> relations = new HashSet<>();
+        //获取ApiServer, Prometheus的Pod
+        Pod apiserverPod = null, prometheusPod = null;
+        for(String key: pods.keySet()){
+            if(key.startsWith("kube-apiserver")){
+                apiserverPod = pods.get(key);
+            }
+            if(key.startsWith("prometheus")){
+                prometheusPod = pods.get(key);
+            }
+        }
+        //获取节点IP与节点的对应关系
+        for(String key: vms.keySet()){
+            IPToVM.put(vms.get(key).getAddress(), vms.get(key));
+        }
+
+        if(apiserverPod==null)
+            System.out.println("Pod: kube-apiserver找不到，没有指标可以与其对应");
+        if(prometheusPod==null)
+            System.out.println("Pod: prometheus找不到，没有指标可以与其对应");
+        //对每个指标确定其job是什么
+        for(String metricName: metricsName){
+//            if(!(metricName.equals("up")||metricName.equals("http_server_requests_seconds_sum")||metricName.equals("http_server_requests_seconds_count")||
+//            metricName.equals("system_load_average_1m")||metricName.equals("node_load5")))
+//                continue;
+            try {
+                //忽略告警指标、container_blkio_device_usage_total（这个指标没看懂）
+                if(metricName.equals("ALERTS")||metricName.equals("container_blkio_device_usage_total"))
+                    continue;
+                String str = restTemplate.getForObject(promethsusQuery + "?query=" + metricName, String.class);
+                if(str.contains("\"resultType\":\"vector\"")){
+                    ExpressionQueriesVectorResponse expressionQueriesVectorResponse = gson.fromJson(str, ExpressionQueriesVectorResponse.class);
+                    for(ResultVector resultVector: expressionQueriesVectorResponse.getData().getResult()){
+                        if(resultVector.getMetric().containsKey("job")){
+//                            System.out.println("Metric: "+ metric+", job: " + resultVector.getMetric().get("job"));
+                            if(resultVector.getMetric().get("job").equals("kubernetes-apiservers")){
+                                //全部和kube-apiserver的Pod关联
+                                if(apiserverPod!=null){
+                                    String relationId = metricName + "_" + apiserverPod.getName();
+                                    if(!relations.contains(relationId)) {
+                                        relations.add(relationId);
+                                        Metric podMetric = new Metric(relationId,relationId,getCurrentTimestamp(),getCurrentTimestamp());
+                                        metrics.put(podMetric.getId(), podMetric);
+                                        PodAndMetric relation = new PodAndMetric(podMetric, apiserverPod, podMetric.getId() + "_MetricAndPod", "RUNTIME_INFO");
+                                        podAndMetrics.add(relation);
+                                    }
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes-kubelet")){
+                                //只有和主机相连的情况
+                                String relationId = metricName + "_" + resultVector.getMetric().get("instance");
+                                if(!relations.contains(relationId)) {
+                                    relations.add(relationId);
+                                    Metric metric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                    metrics.put(metric.getId(), metric);
+                                    MetricAndVirtualMachine metricAndVirtualMachine = new MetricAndVirtualMachine(metric, vms.get(resultVector.getMetric().get("instance")),
+                                            relationId + "_MetricAndNode", "RUNTIME_INFO");
+                                    metricAndVirtualMachines.add(metricAndVirtualMachine);
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes-cadvisor")){
+                                //可能和主机相连也可能和容器连接
+                                if(!resultVector.getMetric().containsKey("pod")||resultVector.getMetric().get("pod").equals("")){
+                                    String relationId = metricName + "_" + resultVector.getMetric().get("instance");
+                                    if(!relations.contains(relationId)) {
+                                        relations.add(relationId);
+                                        Metric metric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                        metrics.put(metric.getId(), metric);
+                                        MetricAndVirtualMachine metricAndVirtualMachine = new MetricAndVirtualMachine(metric, vms.get(resultVector.getMetric().get("instance")),
+                                                relationId + "_MetricAndNode", "RUNTIME_INFO");
+                                        metricAndVirtualMachines.add(metricAndVirtualMachine);
+                                    }
+                                }else{
+                                    if(resultVector.getMetric().get("name").equals("")){
+                                        //和pod连
+                                        String relationId = metricName + "_" + resultVector.getMetric().get("pod");
+                                        if(!relations.contains(relationId)) {
+                                            relations.add(relationId);
+                                            Metric podMetric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                            metrics.put(podMetric.getId(), podMetric);
+                                            PodAndMetric relation = new PodAndMetric(podMetric, pods.get(resultVector.getMetric().get("pod")), podMetric.getId() + "_MetricAndPod", "RUNTIME_INFO");
+                                            podAndMetrics.add(relation);
+                                        }
+                                    }else{
+                                        //和容器连
+                                        String relationId = metricName + "_" + resultVector.getMetric().get("name");
+                                        if(!relations.contains(relationId)){
+                                            relations.add(relationId);
+                                            if(containers.get(resultVector.getMetric().get("name"))==null){
+                                                System.out.println("未查到容器" + resultVector.getMetric().get("name"));
+                                                continue;
+                                            }
+                                            Metric metric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                            metrics.put(metric.getId(), metric);
+                                            MetricAndContainer metricAndContainer = new MetricAndContainer(metric, containers.get(resultVector.getMetric().get("name")), metric.getName() + "_MetricAndContainer", "RUNTIME_INFO");
+                                            metricAndContainers.add(metricAndContainer);
+                                        }
+                                    }
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("kubernetes-service-endpoints")){
+                                //和Pod连，instance为pod IP
+                                String instance = resultVector.getMetric().get("instance");
+                                String IP = instance.substring(0, instance.indexOf(":"));
+                                if(IPpods.containsKey(IP)){
+                                    //指标与该pod相连
+                                    String relationId = metricName + "_" + IPpods.get(IP).getId();
+                                    if(!relations.contains(relationId)) {
+                                        relations.add(relationId);
+                                        Metric podMetric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                        metrics.put(podMetric.getId(), podMetric);
+                                        PodAndMetric relation = new PodAndMetric(podMetric, IPpods.get(IP), podMetric.getId() + "_MetricAndPod", "RUNTIME_INFO");
+                                        podAndMetrics.add(relation);
+                                    }
+                                }else{
+                                    System.out.println("Job kubernetes-service-endpoints's instance " + IP + " doesn't exist.");
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("prometheus")){
+                                //只和prometheus的Pod相连
+                                if(prometheusPod!=null) {
+                                    String relationId = metricName + "_" + prometheusPod.getId();
+                                    if (!relations.contains(relationId)) {
+                                        relations.add(relationId);
+                                        Metric podMetric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                        metrics.put(podMetric.getId(), podMetric);
+                                        PodAndMetric relation = new PodAndMetric(podMetric, prometheusPod, podMetric.getId() + "_MetricAndPod", "RUNTIME_INFO");
+                                        podAndMetrics.add(relation);
+                                    }
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("kubernetes-nodes")){
+                                String instance = resultVector.getMetric().get("instance");
+                                String IP = instance.substring(0, instance.indexOf(":"));
+                                //与主机连接
+                                String relationId = metricName + "_" + IPToVM.get(IP).getId();
+                                if(!relations.contains(relationId)) {
+                                    relations.add(relationId);
+                                    Metric metric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                    metrics.put(metric.getId(), metric);
+                                    MetricAndVirtualMachine metricAndVirtualMachine = new MetricAndVirtualMachine(metric, IPToVM.get(IP),
+                                            relationId + "_MetricAndNode", "RUNTIME_INFO");
+                                    metricAndVirtualMachines.add(metricAndVirtualMachine);
+                                }
+                            }else if(resultVector.getMetric().get("job").equals("kubernetes-pods")){
+                                //与pod相连
+                                String podName = resultVector.getMetric().get("kubernetes_pod_name");
+                                String relationId = metricName + "_" + podName;
+                                if(!relations.contains(relationId)) {
+                                    relations.add(relationId);
+                                    Metric podMetric = new Metric(relationId, relationId, getCurrentTimestamp(), getCurrentTimestamp());
+                                    metrics.put(podMetric.getId(), podMetric);
+                                    PodAndMetric relation = new PodAndMetric(podMetric, pods.get(podName), podMetric.getId() + "_MetricAndPod", "RUNTIME_INFO");
+                                    podAndMetrics.add(relation);
+                                }
+                            }
+                        }else{
+                            System.out.println("Metric: "+ metricName + "doesn't belong to any job.");
+                        }
+                    }
+                }else{
+                    System.out.println("[错误]Promethesus数据不合规 无法解析");
+                }
+            }catch (Exception e){
+                System.out.println("[错误]未查到此Metric Metric名称:" + metricName);
+            }
+        }
     }
 
     public void uploadPodMetrics(){
@@ -965,7 +1366,7 @@ public class DataCollectorService {
                     if(str.contains("\"resultType\":\"vector\"")){
                         ExpressionQueriesVectorResponse res = gson.fromJson(str,ExpressionQueriesVectorResponse.class);
 
-                        PodMetric podMetric = new PodMetric();
+                        Metric podMetric = new Metric();
                         podMetric.setTime((long) Double.parseDouble(res.getData().getResult().get(0).getValue().get(0)));
                         podMetric.setValue(Double.parseDouble(res.getData().getResult().get(0).getValue().get(1)));
                         podMetric.setHistoryTimestamps(new ArrayList<>());
@@ -1049,6 +1450,30 @@ public class DataCollectorService {
         ArrayList<MetricAndContainer> result = gson.fromJson(str, founderListType);
 
         System.out.println("postMetricAndContainerList传输完毕");
+        return result;
+    }
+
+    private ArrayList<MetricAndVirtualMachine> postMetricAndVirtualMachine(ArrayList<MetricAndVirtualMachine> relations){
+        String str = restTemplate.postForObject(neo4jDaoIP + "/metricAndVirtualMachine", relations, String.class);
+        Type founderListType = new TypeToken<ArrayList<MetricAndVirtualMachine>>(){}.getType();
+        ArrayList<MetricAndVirtualMachine> result = gson.fromJson(str, founderListType);
+        System.out.println("postMetricAndVirtualMachine传输完毕");
+        return result;
+    }
+
+    private ArrayList<MetricAndAlertRule> postMetricAndAlertRule(ArrayList<MetricAndAlertRule> relations){
+        String str = restTemplate.postForObject(neo4jDaoIP + "/metricAndAlertRule", relations, String.class);
+        Type founderListType = new TypeToken<ArrayList<MetricAndAlertRule>>(){}.getType();
+        ArrayList<MetricAndAlertRule> result = gson.fromJson(str, founderListType);
+        System.out.println("postMetricAndAlertRule传输完毕");
+        return result;
+    }
+
+    private ArrayList<PodAndMetric> postPodAndMetricList(ArrayList<PodAndMetric> relations){
+        String str = restTemplate.postForObject(neo4jDaoIP + "/podAndMetrics", relations, String.class);
+        Type founderListType = new TypeToken<ArrayList<PodAndMetric>>(){}.getType();
+        ArrayList<PodAndMetric> result = gson.fromJson(str, founderListType);
+        System.out.println("postPodAndMetricList传输完毕");
         return result;
     }
 

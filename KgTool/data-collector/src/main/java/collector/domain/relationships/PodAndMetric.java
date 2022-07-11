@@ -1,12 +1,14 @@
 package collector.domain.relationships;
 
+import collector.domain.entities.Metric;
 import collector.domain.entities.Pod;
-import collector.domain.entities.PodMetric;
-import java.util.Objects;
+import lombok.AllArgsConstructor;
 
+import java.util.Objects;
+@AllArgsConstructor
 public class PodAndMetric extends BasicRelationship  {
 
-    private PodMetric podMetric;
+    private Metric podMetric;
 
     private Pod pod;
 
@@ -14,11 +16,19 @@ public class PodAndMetric extends BasicRelationship  {
         super();
     }
 
-    public PodMetric getPodMetric() {
+    public PodAndMetric(Metric podMetric, Pod pod, String id, String relation){
+        super();
+        this.setPodMetric(podMetric);
+        this.setPod(pod);
+        this.setId(id);
+        this.setRelation(relation);
+    }
+
+    public Metric getPodMetric() {
         return podMetric;
     }
 
-    public void setPodMetric(PodMetric podMetric) {
+    public void setPodMetric(Metric podMetric) {
         this.podMetric = podMetric;
     }
 

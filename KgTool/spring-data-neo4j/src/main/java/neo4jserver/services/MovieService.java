@@ -51,6 +51,12 @@ public class MovieService {
 
 	private final MetricOfPodRepository metricOfPodRepository;
 
+	private final MetricAndVirtualMachineRepository metricAndVirtualMachineRepository;
+
+	private final MetricAndAlertRuleRepository metricAndAlertRuleRepository;
+
+	private final AlertRuleRepository alertRuleRepository;
+
 	public MovieService(PodRepository podRepository,
 						ContainerRepository containerRepository,
 						AppServiceRepository appServiceRepository,
@@ -68,7 +74,8 @@ public class MovieService {
 						TraceInvokeApiToApiRepository traceInvokeApiToApiRepository, MetricOfServiceApiRepository metricOfServiceApiRepository,
 						MetricAndServiceApiRepository metricAndServiceApiRepository,
 						MetricAndPodRepository metricAndPodRepository,
-						MetricOfPodRepository metricOfPodRepository) {
+						MetricOfPodRepository metricOfPodRepository, MetricAndVirtualMachineRepository metricAndVirtualMachineRepository,
+						MetricAndAlertRuleRepository metricAndAlertRuleRepository, AlertRuleRepository alertRuleRepository) {
 		this.podRepository = podRepository;
 		this.virtualMachineRepository = virtualMachineRepository;
 		this.virtualMachineAndPodRepository = virtualMachineAndPodRepository;
@@ -88,6 +95,9 @@ public class MovieService {
 		this.metricAndServiceApiRepository = metricAndServiceApiRepository;
 		this.metricAndPodRepository = metricAndPodRepository;
 		this.metricOfPodRepository = metricOfPodRepository;
+		this.metricAndVirtualMachineRepository = metricAndVirtualMachineRepository;
+		this.metricAndAlertRuleRepository = metricAndAlertRuleRepository;
+		this.alertRuleRepository = alertRuleRepository;
 	}
 
 	@Transactional()
@@ -280,7 +290,7 @@ public class MovieService {
 	@Transactional(readOnly = true)
 	public Metric findByMetricId(String id){
 		Long idLong = Long.parseLong(id);
-		MetricResult mr = metricRepository.getContainerWithLabels(idLong);
+		MetricResult mr = metricRepository.getMetricWithLabels(idLong);
 		Metric metric = mr.metric;
 		metric.setLabels(new HashSet<>(mr.labels));
 		return metric;
@@ -529,6 +539,7 @@ public class MovieService {
 			metricAndContainer.setMetric(metric);
 			metricAndContainer.setContainer(container);
 			metricAndContainer = metricAndContainerRepository.save(metricAndContainer);
+
 			System.out.println("刷新Metric与Container结构");
 		}else{
 			System.out.println("不刷新Metric与Container结构");
@@ -543,6 +554,49 @@ public class MovieService {
 		for(MetricAndContainer relation : relations){
 			MetricAndContainer newRelation = postMetricAndContainer(relation);
 			result.add(newRelation);
+		}
+		return result;
+	}
+
+	@Transactional()
+	public ArrayList<MetricAndVirtualMachine> postMetricAndVirtualMachine(ArrayList<MetricAndVirtualMachine> relations){
+		ArrayList<MetricAndVirtualMachine> result = new ArrayList<>();
+		for(MetricAndVirtualMachine relation: relations){
+			Metric metric = relation.getMetric();
+			VirtualMachine virtualMachine = relation.getVirtualMachine();
+			if(!metricRepository.findByName(metric.getName()).isPresent() ||
+					!virtualMachineRepository.findById(virtualMachine.getId()).isPresent()){
+				metricRepository.save(metric);
+				virtualMachineRepository.save(virtualMachine);
+				System.out.println("刷新Metric与VM结构");
+			}else{
+				System.out.println("不刷新Metric与VM结构");
+			}
+			if(!metricAndVirtualMachineRepository.findById(relation.getId()).isPresent()) {
+				result.add(metricAndVirtualMachineRepository.save(relation));
+
+			}
+		}
+		return result;
+	}
+
+	@Transactional()
+	public ArrayList<MetricAndAlertRules> postMetricAndAlertRules(ArrayList<MetricAndAlertRules> relations){
+		ArrayList<MetricAndAlertRules> result = new ArrayList<>();
+		for(MetricAndAlertRules relation: relations){
+			Metric metric = relation.getMetric();
+			AlertRule alertRule = relation.getAlertRule();
+			if(!metricRepository.findByName(metric.getName()).isPresent() ||
+					!metricAndAlertRuleRepository.findById(alertRule.getId()).isPresent()){
+				metricRepository.save(metric);
+				alertRuleRepository.save(alertRule);
+				System.out.println("刷新Metric与AlertRule结构");
+			}else{
+				System.out.println("不刷新Metric与AlertRule结构");
+			}
+			if(!metricAndAlertRuleRepository.findById(relation.getId()).isPresent()) {
+				result.add(metricAndAlertRuleRepository.save(relation));
+			}
 		}
 		return result;
 	}

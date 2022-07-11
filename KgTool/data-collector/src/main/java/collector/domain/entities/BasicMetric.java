@@ -40,7 +40,7 @@ public class BasicMetric extends GraphNode {
         this.value = value;
     }
 
-    public double getAbnormality() {
+    public double AgetAbnormality() {
         return abnormality;
     }
 

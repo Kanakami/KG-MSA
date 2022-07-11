@@ -11,5 +11,5 @@ public interface MetricAndContainerRepository extends Neo4jRepository<MetricAndC
     Optional<MetricAndContainer> findById(String id);
 
     @Query("MATCH p=()-[r:MetricAndContainer]->() RETURN p")
-    ArrayList<MetricAndContainer> findAllPodAndContainer();
+    ArrayList<MetricAndContainer> findAllMetricAndContainer();
 }
